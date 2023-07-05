@@ -1,4 +1,6 @@
 import lmdb from 'node-lmdb'
+import { Buffer } from 'buffer';
+
 
 let data = {}
 let keysWithTime = new Set();
@@ -14,14 +16,17 @@ const storageTypes = {
 }
 
 const env = new lmdb.Env();
+
+let expirationTimer = null;
+
 env.open({
-    path: '../data/',
+    path: '..\\data',
+    mapSize: 2*1024*1024*1024
 });
 
-const txn = env.beginTxn();
-const dbi = txn.openDbi({
+const dbi = env.openDbi({
     name: 'cache-database',
-    create: true
+    create: true,
 });
 
 export class VCache {
@@ -30,23 +35,28 @@ export class VCache {
     }
 
     set(key, value, cacheType, time) {
-        setItem(key, value, cacheType, time)
+        return setItem(key, value, cacheType, time)
     }
 
     get(key) {
-        getItem(key)
+        return getItem(key)
     }
 
     exist(key) {
-        itemExists(key)
+        return itemExists(key)
     }
 
     delete(key) {
-        deleteItem(key)
+        return deleteItem(key)
+    }
+
+    closeConnection(){
+        clearInterval(expirationTimer)
+        env.close();
     }
 }
 
-async function validateTimeProperties() {
+function validateTimeProperties() {
     const currentTimestamp = Date.now();
 
     for (const key of keysWithTime) {
@@ -67,6 +77,7 @@ function setItem(key, value, cacheType, time) {
     } else {
         throw "This type isn't a valid cache type"
     }
+    return true;
 }
 
 function setItemToSmallCache(key, value, time) {
@@ -79,25 +90,39 @@ function setItemToSmallCache(key, value, time) {
 }
 
 function setItemToLargeCache(key, value, time) {
+
+    const txn = env.beginTxn();
+
     try {
         if (time != undefined) {
-            txn.putBinary(dbi, key, { value: value, time: time, storageType: storageTypes.lmdb });
+            txn.putBinary(dbi, key, Buffer.from(JSON.stringify({ value: value, time: time, type: storageTypes.lmdb })));
             keysWithTime.add(key);
-
+            data[key] = {
+                value: (txn) => {
+                    return txn.getBinary(dbi, key)
+                }, type: storageTypes.lmdb, time: time
+            };
         } else {
-            txn.putBinary(dbi, key, { value: value, storageType: storageTypes.lmdb });
+            txn.putBinary(dbi, key, Buffer.from(JSON.stringify({ value: value, type: storageTypes.lmdb })));
+            data[key] = {
+                value: () => {
+                    const txn = env.beginTxn();
+                    let value = txn.getBinary(dbi, key)
+                    txn.commit();
+                    return value;
+                }, type: storageTypes.lmdb
+            };
         }
-
-        data[key] = () => txn.getBinary(dbi, key);
         txn.commit();
-    } catch {
+    } catch (ex) {
+        console.log(ex)
         txn.abort();
         throw `Fail to add item ${key}.`
     }
 }
 
 function startExpirationTimer(interval) {
-    setInterval(validateTimeProperties(), interval)
+    expirationTimer = setInterval(() => { validateTimeProperties() }, interval)
 }
 
 function getItem(key) {
@@ -108,7 +133,7 @@ function getItem(key) {
     }
 
     if (item.type === storageTypes.lmdb) {
-        return item.value()
+        return JSON.parse(item.value().toString());
     } else {
         return item.value
     }
@@ -130,10 +155,11 @@ function deleteItem(key) {
 
     if (item != undefined) {
         if (item.storageType == storageTypes.lmdb) {
-            try{
+            const txn = env.beginTxn();
+            try {
                 txn.del(dbi, key);
                 txn.commit();
-            }catch{
+            } catch {
                 txn.abort();
                 throw `Fail to delete item ${key}`
             }
