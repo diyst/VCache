@@ -6,10 +6,8 @@ VCache is a simple cache library that provides in-memory and LMDB-based caching 
 
 ## Installation
 
-Before using VCache, make sure you have Node.js installed. To install the library, use the following command:
-
 ```bash
-npm install node-lmdb
+npm install VCache
 ```
 
 ## Usage
