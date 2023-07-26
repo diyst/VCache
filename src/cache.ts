@@ -1,5 +1,7 @@
 import lmdb from 'node-lmdb'
 import { Buffer } from 'buffer';
+import { rmSync, readdirSync, mkdirSync } from 'fs';
+import path, { resolve } from 'path';
 
 let data: any = {}
 let keysWithTime = new Set<string>();
@@ -18,6 +20,8 @@ const env = new lmdb.Env();
 
 let expirationTimer: NodeJS.Timeout | undefined = undefined;
 
+prepareDbContext();
+
 env.open({
   path: '..\\data',
   mapSize: 2 * 1024 * 1024 * 1024
@@ -33,11 +37,11 @@ export class VCache {
     startExpirationTimer(300000)
   }
 
-  set(key: string, value: any, cacheType: CacheTypes = CacheTypes.small, time?: number): boolean {
+  set(key: string, value: any, cacheType: CacheTypes = CacheTypes.small, time?: number): Promise<boolean> {
     return setItem(key, value, cacheType, time)
   }
 
-  get(key: string): any {
+  get(key: string): Promise<any> {
     return getItem(key)
   }
 
@@ -45,7 +49,7 @@ export class VCache {
     return itemExists(key)
   }
 
-  delete(key: string): boolean {
+  delete(key: string): Promise<boolean> {
     return deleteItem(key)
   }
 
@@ -68,20 +72,21 @@ function validateTimeProperties() {
   }
 }
 
-function setItem(key: string, value: any, cacheType: CacheTypes, time?: number) {
+function setItem(key: string, value: any, cacheType: CacheTypes, time?: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    switch (cacheType) {
+      case CacheTypes.small:
+        setItemToSmallCache(key, value, time)
+        break;
+      case CacheTypes.large:
+        setItemToLargeCache(key, value, time)
+        break;
+      default:
+        reject("This type isn't a valid cache type");
+    }
 
-  switch (cacheType) {
-    case CacheTypes.small:
-      setItemToSmallCache(key, value, time)
-      break;
-    case CacheTypes.large:
-      setItemToLargeCache(key, value, time)
-      break;
-    default:
-      throw "This type isn't a valid cache type";
-  }
-
-  return true;
+    resolve(true);
+  })
 }
 
 function setItemToSmallCache(key: string, value: any, time?: number) {
@@ -101,17 +106,29 @@ function setItemToLargeCache(key: string, value: any, time?: number) {
     if (time != undefined) {
       txn.putBinary(dbi, key, Buffer.from(JSON.stringify(value)));
       keysWithTime.add(key);
-      data[key] = { value: (txn: lmdb.Txn) => txn.getBinary(dbi, key), type: StorageTypes.lmdb, time: time };
+
+      data[key] = {
+        value: async () => {
+          const txn = env.beginTxn();
+          let value = txn.getBinary(dbi, key);
+          txn.commit();
+          return value;
+        },
+        type: StorageTypes.lmdb,
+        time: time
+      };
     } else {
       txn.putBinary(dbi, key, Buffer.from(JSON.stringify({ value: value, type: StorageTypes.lmdb })));
+
       data[key] = {
-        value: () => {
+        value: async () => {
           const txn = env.beginTxn();
-          let value = txn.getBinary(dbi, key)
+          let value = txn.getBinary(dbi, key);
           txn.commit();
           return value;
         }, type: StorageTypes.lmdb
       };
+
     }
     txn.commit();
   } catch {
@@ -124,53 +141,71 @@ function startExpirationTimer(interval: number) {
   expirationTimer = setInterval(() => { validateTimeProperties() }, interval)
 }
 
-function getItem(key: string) {
-  let item = data[key]
+async function getItem(key: string): Promise<any> {
+  return new Promise(async (resolve, reject) => {
 
-  if (Object.keys(item).includes("time")) {
-    validateTime(item.time, key)
-  }
+    let item = data[key]
 
-  if (item.type === StorageTypes.lmdb) {
-    return JSON.parse(item.value().toString());
-  } else {
-    return item.value
-  }
+    if (Object.keys(item).includes("time")) {
+      if (!(await validateTime(item.time, key))) resolve(undefined)
+    }
+
+    if (item.type === StorageTypes.lmdb) {
+      resolve(JSON.parse(item.value().toString()));
+    } else {
+      resolve(item.value)
+    }
+  })
 }
 
-function validateTime(time: number, key: string) {
+async function validateTime(time: number, key: string) {
   const currentTimestamp = Date.now();
 
   if (currentTimestamp > time) {
-    if(deleteItem(key)) return false;
+    if (await deleteItem(key)) return false;
   }
 
   return true;
 }
 
-function deleteItem(key:string) {
-  let item = data[key]
+function deleteItem(key: string): Promise<boolean> {
+  return new Promise((resolve,reject) => {
 
-  if (item != undefined) {
-    if (item.storageType == StorageTypes.lmdb) {
-      const txn = env.beginTxn();
-      try {
-        txn.del(dbi, key);
+    let item = data[key]
+    
+    if (item != undefined) {
+      if (item.storageType == StorageTypes.lmdb) {
+        const txn = env.beginTxn();
+        try {
+          txn.del(dbi, key);
         txn.commit();
       } catch {
         txn.abort();
-        throw `Fail to delete item ${key}`
+        reject(`Fail to delete item ${key}`)
       }
     }
-
+    
     delete data[key]
     keysWithTime.delete(key)
-    return true;
+    resolve(true);
   }
-
-  return false;
+  
+  reject("Item don't exist.");
+})
 }
 
 function itemExists(key: string) {
   return data[key] != undefined
+}
+
+function prepareDbContext() {
+  const dataPath = path.join(__dirname, "data")
+
+  if (readdirSync(__dirname).includes("data")) {
+    if (readdirSync(dataPath).length > 0) {
+      rmSync(dataPath, { force: true, recursive: true });
+    }
+  }
+
+  mkdirSync(dataPath);
 }

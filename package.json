@@ -2,7 +2,7 @@
   "name": "vcache",
   "version": "1.0.0",
   "description": "",
-  "main": "src/cache.js",
+  "main": "build/cache.js",
   "type": "module",
   "scripts": {
     "build": "rimraf ./build && tsc"
