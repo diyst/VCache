@@ -7,7 +7,7 @@ VCache is a simple cache library that provides in-memory and LMDB-based caching 
 ## Installation
 
 ```bash
-npm install vcache
+npm i @diyst/vcache
 ```
 
 ## Usage
